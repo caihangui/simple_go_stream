@@ -314,15 +314,60 @@ func (streamer *Streamer) GroupBy(getKey func(elem interface{}) interface{}, res
 	if err != nil {
 		return err
 	}
-	for i := 0; i < len(scanResult); i++ {
-		key := getKey(scanResult[i])
-		value := val.MapIndex(reflect.ValueOf(key))
-		if !value.IsValid() {
-			value = reflect.MakeSlice(reflect.SliceOf(reflect.ValueOf(scanResult[i]).Type()), 0, 0)
+	return streamer.groupBy(getKey, scanResult, &val)
+}
+
+// groupBy GroupBy内部实现，支持并行
+func (streamer *Streamer) groupBy(getKey func(elem interface{}) interface{}, scanResult []interface{}, valPointer *reflect.Value) error {
+	var wg sync.WaitGroup
+	wg.Add(streamer.parallel)
+	val := *valPointer
+	batch := len(scanResult) / streamer.parallel
+	// collect results from different worker goroutine
+	// make the cap equals streamer.parallel, and use iteration index as goroutineID to avoid concurrent problem
+	resultCollection := make(map[int]map[interface{}][]interface{}, streamer.parallel)
+
+	for i := 0; i < streamer.parallel; i++ {
+		start := i * batch
+		end := start + batch
+		if i == streamer.parallel-1 && end < len(scanResult) {
+			end = len(scanResult)
 		}
-		value = reflect.Append(value, reflect.ValueOf(scanResult[i]))
-		val.SetMapIndex(reflect.ValueOf(key), value)
+		// new worker goroutine
+		go func(goroutineID, start, end int) {
+			defer func() {
+				wg.Done()
+			}()
+			curGoroutineMap := map[interface{}][]interface{}{}
+			resultCollection[goroutineID] = curGoroutineMap
+			for j := start; j < end; j++ {
+				key := getKey(scanResult[j])
+				valList := curGoroutineMap[key]
+				if valList == nil {
+					valList = make([]interface{}, 0, 1)
+				}
+				valList = append(valList, scanResult[j])
+				curGoroutineMap[key] = valList
+			}
+		}(i, start, end)
 	}
+	wg.Wait()
+
+	// merge results from different worker goroutine
+	for i := 0; i < streamer.parallel; i++ {
+		goroutineMap := resultCollection[i]
+		for k, v := range goroutineMap {
+			valList := val.MapIndex(reflect.ValueOf(k))
+			if !valList.IsValid() {
+				valList = reflect.MakeSlice(val.Type().Elem(), 0, len(v))
+			}
+			for j := 0; j < len(v); j++ {
+				valList = reflect.Append(valList, reflect.ValueOf(v[j]))
+			}
+			val.SetMapIndex(reflect.ValueOf(k), valList)
+		}
+	}
+
 	return nil
 }
 
