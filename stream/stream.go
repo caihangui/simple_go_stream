@@ -72,6 +72,48 @@ type Streamer struct {
 	data         []interface{}
 }
 
+// NewStreamerWithData 只接受slice类型
+func NewStreamerWithData(data interface{}) (*Streamer, error) {
+	interfaceList := []interface{}{}
+	val := reflect.ValueOf(data)
+	if val.Kind() == reflect.Ptr {
+		if val.Elem().Kind() != reflect.Slice {
+			return nil, errors.New("data must be slice or slice pointer")
+		}
+		val = val.Elem()
+	}
+	if val.Kind() != reflect.Slice {
+		return nil, errors.New("data must be slice or slice pointer")
+	}
+	for i := 0; i < val.Len(); i++ {
+		interfaceList = append(interfaceList, val.Index(i).Interface())
+	}
+	return &Streamer{
+		lastStreamer: nil,
+		parallel:     1,
+		filterFunc:   nil,
+		mapFunc:      nil,
+		sortFunc:     nil,
+		offset:       0,
+		limit:        0,
+		data:         interfaceList,
+	}, nil
+}
+
+// Parallel 设置并行度
+func (streamer *Streamer) Parallel(parallel int) *Streamer {
+	// at least 1 parallel
+	if parallel <= 0 {
+		parallel = 1
+	}
+	// max parallel = 2 * cpu_num
+	if parallel > runtime.NumCPU()*2 {
+		parallel = runtime.NumCPU() * 2
+	}
+	streamer.parallel = parallel
+	return streamer
+}
+
 // Filter 过滤规则，filter的参数elem是stream中的元素
 // 若调用者在filter中进行转型断言，需要调用者自己保证stream中的元素可以被转型断言
 func (streamer *Streamer) Filter(filter func(elem interface{}) bool) *Streamer {
@@ -100,6 +142,51 @@ func (streamer *Streamer) Map(mapper func(elem interface{}) interface{}) *Stream
 	}
 }
 
+// Limit 取前n条记录，惰性操作，只在执行了终结操作时起作用
+func (streamer *Streamer) Limit(n int) *Streamer {
+	if n <= 0 {
+		panic("limit rows can't less than or equal 0")
+	}
+	return &Streamer{
+		lastStreamer: streamer,
+		parallel:     streamer.parallel,
+		filterFunc:   nil,
+		mapFunc:      nil,
+		sortFunc:     nil,
+		limit:        n,
+		offset:       streamer.offset,
+	}
+}
+
+// Offset 跳过前n条记录，惰性操作，只在执行了终结操作时起作用
+func (streamer *Streamer) Offset(n int) *Streamer {
+	if n <= 0 {
+		panic("offset rows can't less than or equal 0")
+	}
+	return &Streamer{
+		lastStreamer: streamer,
+		parallel:     streamer.parallel,
+		filterFunc:   nil,
+		mapFunc:      nil,
+		sortFunc:     nil,
+		limit:        streamer.limit,
+		offset:       n,
+	}
+}
+
+// Sorted 排序
+func (streamer *Streamer) Sorted(sorter func(elem1, elem2 interface{}) bool) *Streamer {
+	return &Streamer{
+		lastStreamer: streamer,
+		parallel:     streamer.parallel,
+		filterFunc:   nil,
+		mapFunc:      nil,
+		limit:        streamer.limit,
+		offset:       streamer.offset,
+		sortFunc:     sorter,
+	}
+}
+
 // Foreach 遍历streamer中的每个元素
 func (streamer *Streamer) Foreach(op func(elem interface{}) error) error {
 	result, err := streamer.scan()
@@ -113,20 +200,6 @@ func (streamer *Streamer) Foreach(op func(elem interface{}) error) error {
 		}
 	}
 	return nil
-}
-
-// Parallel 设置并行度
-func (streamer *Streamer) Parallel(parallel int) *Streamer {
-	// at least 1 parallel
-	if parallel <= 0 {
-		parallel = 1
-	}
-	// max parallel = 2 * cpu_num
-	if parallel > runtime.NumCPU()*2 {
-		parallel = runtime.NumCPU() * 2
-	}
-	streamer.parallel = parallel
-	return streamer
 }
 
 // Scan 将结果带出
@@ -151,6 +224,87 @@ func (streamer *Streamer) Scan(result interface{}) error {
 	}
 	return nil
 }
+
+// Count 计数
+func (streamer *Streamer) Count() (int, error) {
+	result, err := streamer.scan()
+	if err != nil {
+		return 0, err
+	}
+	return len(result), nil
+}
+
+// GroupBy 根据getKey函数获取key，并将group by结果作为一个result map带回
+func (streamer *Streamer) GroupBy(getKey func(elem interface{}) interface{}, result interface{}) error {
+	if getKey == nil {
+		return errors.New("getKey func can't be nil")
+	}
+	val := reflect.ValueOf(result)
+	kind := val.Kind()
+	if kind == reflect.Ptr {
+		if val.Elem().Kind() != reflect.Map {
+			return errors.New("result must be map or map pointer")
+		}
+		val = val.Elem()
+		// nil map init
+		if val.IsNil() {
+			val.Set(reflect.MakeMap(val.Type()))
+		}
+	}
+	if val.Kind() != reflect.Map {
+		return errors.New("result must be map or map pointer")
+	}
+	scanResult, err := streamer.scan()
+	if err != nil {
+		return err
+	}
+	return streamer.groupBy(getKey, scanResult, &val)
+}
+
+// First 取第一个结果
+func (streamer *Streamer) First(result interface{}) (exist bool, err error) {
+	val := reflect.ValueOf(result)
+	if val.Kind() != reflect.Ptr {
+		return false, errors.New("result must be a pointer")
+	}
+	scanResult, err := streamer.scan()
+	if err != nil {
+		return false, err
+	}
+	return streamer.indexAt(0, scanResult, result)
+}
+
+// Last 取最后一个结果
+func (streamer *Streamer) Last(result interface{}) (bool, error) {
+	val := reflect.ValueOf(result)
+	if val.Kind() != reflect.Ptr {
+		return false, errors.New("result must be a pointer")
+	}
+	scanResult, err := streamer.scan()
+	if err != nil {
+		return false, err
+	}
+	return streamer.indexAt(len(scanResult)-1, scanResult, result)
+}
+
+// IndexAt 取第index个结果（从0开始计数）
+func (streamer *Streamer) IndexAt(index int, result interface{}) (bool, error) {
+	val := reflect.ValueOf(result)
+	if val.Kind() != reflect.Ptr {
+		return false, errors.New("result must be a pointer")
+	}
+	scanResult, err := streamer.scan()
+	if err != nil {
+		return false, err
+	}
+	return streamer.indexAt(index, scanResult, result)
+}
+
+/*
+ * ============================================
+ * 				inner implement
+ * ============================================
+ */
 
 // scan 内部实现，用于其他方法复用
 func (streamer *Streamer) scan() ([]interface{}, error) {
@@ -236,87 +390,6 @@ func (streamer *Streamer) _map(data []interface{}) (result []interface{}) {
 	return result
 }
 
-// Limit 取前n条记录，惰性操作，只在执行了终结操作时起作用
-func (streamer *Streamer) Limit(n int) *Streamer {
-	if n <= 0 {
-		panic("limit rows can't less than or equal 0")
-	}
-	return &Streamer{
-		lastStreamer: streamer,
-		parallel:     streamer.parallel,
-		filterFunc:   nil,
-		mapFunc:      nil,
-		sortFunc:     nil,
-		limit:        n,
-		offset:       streamer.offset,
-	}
-}
-
-// Offset 跳过前n条记录，惰性操作，只在执行了终结操作时起作用
-func (streamer *Streamer) Offset(n int) *Streamer {
-	if n <= 0 {
-		panic("offset rows can't less than or equal 0")
-	}
-	return &Streamer{
-		lastStreamer: streamer,
-		parallel:     streamer.parallel,
-		filterFunc:   nil,
-		mapFunc:      nil,
-		sortFunc:     nil,
-		limit:        streamer.limit,
-		offset:       n,
-	}
-}
-
-// Sorted 排序
-func (streamer *Streamer) Sorted(sorter func(elem1, elem2 interface{}) bool) *Streamer {
-	return &Streamer{
-		lastStreamer: streamer,
-		parallel:     streamer.parallel,
-		filterFunc:   nil,
-		mapFunc:      nil,
-		limit:        streamer.limit,
-		offset:       streamer.offset,
-		sortFunc:     sorter,
-	}
-}
-
-// Count 计数
-func (streamer *Streamer) Count() (int, error) {
-	result, err := streamer.scan()
-	if err != nil {
-		return 0, err
-	}
-	return len(result), nil
-}
-
-// GroupBy 根据getKey函数获取key，并将group by结果作为一个result map带回
-func (streamer *Streamer) GroupBy(getKey func(elem interface{}) interface{}, result interface{}) error {
-	if getKey == nil {
-		return errors.New("getKey func can't be nil")
-	}
-	val := reflect.ValueOf(result)
-	kind := val.Kind()
-	if kind == reflect.Ptr {
-		if val.Elem().Kind() != reflect.Map {
-			return errors.New("result must be map or map pointer")
-		}
-		val = val.Elem()
-		// nil map init
-		if val.IsNil() {
-			val.Set(reflect.MakeMap(val.Type()))
-		}
-	}
-	if val.Kind() != reflect.Map {
-		return errors.New("result must be map or map pointer")
-	}
-	scanResult, err := streamer.scan()
-	if err != nil {
-		return err
-	}
-	return streamer.groupBy(getKey, scanResult, &val)
-}
-
 // groupBy GroupBy内部实现，支持并行
 func (streamer *Streamer) groupBy(getKey func(elem interface{}) interface{}, scanResult []interface{}, valPointer *reflect.Value) error {
 	var wg sync.WaitGroup
@@ -371,45 +444,6 @@ func (streamer *Streamer) groupBy(getKey func(elem interface{}) interface{}, sca
 	return nil
 }
 
-// First 取第一个结果
-func (streamer *Streamer) First(result interface{}) (exist bool, err error) {
-	val := reflect.ValueOf(result)
-	if val.Kind() != reflect.Ptr {
-		return false, errors.New("result must be a pointer")
-	}
-	scanResult, err := streamer.scan()
-	if err != nil {
-		return false, err
-	}
-	return streamer.indexAt(0, scanResult, result)
-}
-
-// Last 取最后一个结果
-func (streamer *Streamer) Last(result interface{}) (bool, error) {
-	val := reflect.ValueOf(result)
-	if val.Kind() != reflect.Ptr {
-		return false, errors.New("result must be a pointer")
-	}
-	scanResult, err := streamer.scan()
-	if err != nil {
-		return false, err
-	}
-	return streamer.indexAt(len(scanResult)-1, scanResult, result)
-}
-
-// IndexAt 取第index个结果（从0开始计数）
-func (streamer *Streamer) IndexAt(index int, result interface{}) (bool, error) {
-	val := reflect.ValueOf(result)
-	if val.Kind() != reflect.Ptr {
-		return false, errors.New("result must be a pointer")
-	}
-	scanResult, err := streamer.scan()
-	if err != nil {
-		return false, err
-	}
-	return streamer.indexAt(index, scanResult, result)
-}
-
 // indexAt IndexAt的内部实现
 func (streamer *Streamer) indexAt(index int, scanResult []interface{}, result interface{}) (bool, error) {
 	val := reflect.ValueOf(result).Elem()
@@ -418,32 +452,4 @@ func (streamer *Streamer) indexAt(index int, scanResult []interface{}, result in
 	}
 	val.Set(reflect.ValueOf(scanResult[index]))
 	return true, nil
-}
-
-// NewStreamerWithData 只接受slice类型
-func NewStreamerWithData(data interface{}) (*Streamer, error) {
-	interfaceList := []interface{}{}
-	val := reflect.ValueOf(data)
-	if val.Kind() == reflect.Ptr {
-		if val.Elem().Kind() != reflect.Slice {
-			return nil, errors.New("data must be slice or slice pointer")
-		}
-		val = val.Elem()
-	}
-	if val.Kind() != reflect.Slice {
-		return nil, errors.New("data must be slice or slice pointer")
-	}
-	for i := 0; i < val.Len(); i++ {
-		interfaceList = append(interfaceList, val.Index(i).Interface())
-	}
-	return &Streamer{
-		lastStreamer: nil,
-		parallel:     1,
-		filterFunc:   nil,
-		mapFunc:      nil,
-		sortFunc:     nil,
-		offset:       0,
-		limit:        0,
-		data:         interfaceList,
-	}, nil
 }
