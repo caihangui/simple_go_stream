@@ -308,11 +308,11 @@ func (streamer *Streamer) IndexAt(index int, result interface{}) (bool, error) {
  */
 
 // scan 内部实现，用于其他方法复用
-func (streamer *Streamer) scan() (data []interface{},err error) {
+func (streamer *Streamer) scan() (data []interface{}, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			data = nil
-			err = fmt.Errorf("%v",r)
+			err = fmt.Errorf("%v", r)
 		}
 	}()
 	streamerList := []*Streamer{}
