@@ -2,6 +2,7 @@ package stream
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"runtime"
 	"sort"
@@ -307,13 +308,19 @@ func (streamer *Streamer) IndexAt(index int, result interface{}) (bool, error) {
  */
 
 // scan 内部实现，用于其他方法复用
-func (streamer *Streamer) scan() ([]interface{}, error) {
+func (streamer *Streamer) scan() (data []interface{},err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			data = nil
+			err = fmt.Errorf("%v",r)
+		}
+	}()
 	streamerList := []*Streamer{}
 	lastStreamer := streamer
 	for ; lastStreamer != nil; lastStreamer = lastStreamer.lastStreamer {
 		streamerList = append(streamerList, lastStreamer)
 	}
-	data := streamerList[len(streamerList)-1].data
+	data = streamerList[len(streamerList)-1].data
 	for i := len(streamerList) - 1; i >= 0; i-- {
 		if streamerList[i].filterFunc != nil {
 			data = streamerList[i].filter(data)
