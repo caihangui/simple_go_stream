@@ -314,30 +314,32 @@ func (streamer *Streamer) scan() ([]interface{}, error) {
 		streamerList = append(streamerList, lastStreamer)
 	}
 	data := streamerList[len(streamerList)-1].data
+	newData := []interface{}{}
+	newData = append(newData, data...)
 	for i := len(streamerList) - 1; i >= 0; i-- {
 		if streamerList[i].filterFunc != nil {
-			data = streamerList[i].filter(data)
+			newData = streamerList[i].filter(newData)
 		}
 		if streamerList[i].mapFunc != nil {
-			data = streamerList[i]._map(data)
+			newData = streamerList[i]._map(newData)
 		}
 		if streamerList[i].sortFunc != nil {
-			sort.Slice(data, func(first, second int) bool {
-				return streamerList[i].sortFunc(data[first], data[second])
+			sort.Slice(newData, func(first, second int) bool {
+				return streamerList[i].sortFunc(newData[first], newData[second])
 			})
 		}
 	}
 	// offset limit
 	offset := 0
-	if streamer.offset < len(data) {
+	if streamer.offset < len(newData) {
 		offset = streamer.offset
 	}
-	limit := len(data) - offset
+	limit := len(newData) - offset
 	if streamer.limit > 0 && streamer.limit < limit {
 		limit = streamer.limit
 	}
-	data = data[offset : offset+limit]
-	return data, nil
+	newData = newData[offset : offset+limit]
+	return newData, nil
 }
 
 // filter 内部实现，用于其他方法复用
@@ -345,24 +347,30 @@ func (streamer *Streamer) filter(data []interface{}) (result []interface{}) {
 	var wg sync.WaitGroup
 	wg.Add(streamer.parallel)
 	batch := len(data) / streamer.parallel
+	results := make([][]interface{}, streamer.parallel, streamer.parallel)
 	for i := 0; i < streamer.parallel; i++ {
 		start := i * batch
 		end := start + batch
 		if i == streamer.parallel-1 && end < len(data) {
 			end = len(data)
 		}
-		go func(start, end int) {
+		go func(goroutineID, start, end int) {
 			defer func() {
 				wg.Done()
 			}()
+			res := []interface{}{}
 			for i := start; i < end; i++ {
 				if streamer.filterFunc(data[i]) {
-					result = append(result, data[i])
+					res = append(res, data[i])
 				}
 			}
-		}(start, end)
+			results[goroutineID] = res
+		}(i, start, end)
 	}
 	wg.Wait()
+	for i := 0; i < len(results); i++ {
+		result = append(result, results[i]...)
+	}
 	return result
 }
 
@@ -371,22 +379,28 @@ func (streamer *Streamer) _map(data []interface{}) (result []interface{}) {
 	var wg sync.WaitGroup
 	wg.Add(streamer.parallel)
 	batch := len(data) / streamer.parallel
+	results := make([][]interface{}, streamer.parallel, streamer.parallel)
 	for i := 0; i < streamer.parallel; i++ {
 		start := i * batch
 		end := start + batch
 		if i == streamer.parallel-1 && end < len(data) {
 			end = len(data)
 		}
-		go func(start, end int) {
+		go func(goroutineID, start, end int) {
 			defer func() {
 				wg.Done()
 			}()
+			res := []interface{}{}
 			for i := start; i < end; i++ {
-				result = append(result, streamer.mapFunc(data[i]))
+				res = append(res, streamer.mapFunc(data[i]))
 			}
-		}(start, end)
+			results[goroutineID] = res
+		}(i, start, end)
 	}
 	wg.Wait()
+	for i := 0; i < len(results); i++ {
+		result = append(result, results[i]...)
+	}
 	return result
 }
 
