@@ -13,10 +13,6 @@ type testUser struct {
 	Email string
 }
 
-//func (u *testUser) String() string {
-//	return fmt.Sprintf("{\"id\":%d,\"name\":\"%s\",\"age\":%d,\"email\":\"%s\"}",u.ID,u.Name,u.Age,u.Email)
-//}
-
 var testData = []testUser{
 	{
 		ID:    1,
@@ -63,12 +59,9 @@ func TestNewStreamerWithData(t *testing.T) {
 
 func TestStreamerFilter(t *testing.T) {
 	result := []testUser{}
-	err := streamer.Filter(func(elem testUser) bool {
+	streamer.Filter(func(elem testUser) bool {
 		return elem.Age >= 18
 	}).Scan(&result)
-	if err != nil {
-		t.Fatal(err)
-	}
 	expectedResult := []testUser{
 		{
 			ID:    3,
@@ -83,20 +76,32 @@ func TestStreamerFilter(t *testing.T) {
 			Email: "zhaoliu@xxx.com",
 		},
 	}
+	assertEquals(t, result, expectedResult)
 
+	// multi filter
+	streamer.Filter(func(elem testUser) bool {
+		return elem.Age >= 18
+	}, func(elem testUser) bool {
+		return elem.Name != "wangwu"
+	}).Scan(&result)
+	expectedResult = []testUser{
+		{
+			ID:    4,
+			Name:  "zhaoliu",
+			Age:   25,
+			Email: "zhaoliu@xxx.com",
+		},
+	}
 	assertEquals(t, result, expectedResult)
 }
 
 func TestStreamerMap(t *testing.T) {
 	result := []int{}
-	err := streamer.Filter(func(elem testUser) bool {
+	streamer.Filter(func(elem testUser) bool {
 		return elem.Age >= 18
 	}).Map(func(elem testUser) int {
 		return elem.ID
 	}).Scan(&result)
-	if err != nil {
-		t.Fatal(err)
-	}
 	expectedResult := []int{3, 4}
 
 	assertEquals(t, result, expectedResult)
@@ -104,10 +109,7 @@ func TestStreamerMap(t *testing.T) {
 
 func TestStreamerOffset(t *testing.T) {
 	result := []testUser{}
-	err := streamer.Offset(1).Scan(&result)
-	if err != nil {
-		t.Fatal(err)
-	}
+	streamer.Offset(1).Scan(&result)
 	expectedResult := testData[1:]
 
 	assertEquals(t, result, expectedResult)
@@ -115,10 +117,7 @@ func TestStreamerOffset(t *testing.T) {
 
 func TestStreamerLimit(t *testing.T) {
 	result := []testUser{}
-	err := streamer.Offset(1).Limit(2).Scan(&result)
-	if err != nil {
-		t.Fatal(err)
-	}
+	streamer.Offset(1).Limit(2).Scan(&result)
 	expectedResult := testData[1 : 1+2]
 
 	assertEquals(t, result, expectedResult)
@@ -126,35 +125,42 @@ func TestStreamerLimit(t *testing.T) {
 
 func TestStreamerSorted(t *testing.T) {
 	result := []int{}
-	err := streamer.Sorted(func(elem1, elem2 testUser) bool {
+	streamer.Sorted(func(elem1, elem2 testUser) bool {
 		return strings.Compare(elem1.Name, elem2.Name) > 0
 	}).Map(func(elem testUser) int {
 		return elem.ID
 	}).Scan(&result)
-	if err != nil {
-		t.Fatal(err)
-	}
 	expectedResult := []int{4, 1, 3, 2}
 
 	assertEquals(t, result, expectedResult)
 }
 
 func TestStreamerForeach(t *testing.T) {
-	result := []int{}
-	streamer.Foreach(func(elem testUser) {
-		result = append(result, elem.Age+10)
+	data := []*testUser{}
+	for _, user := range testData {
+		// need to clone new user
+		newUser := user
+		data = append(data, &newUser)
+	}
+	newStreamerWithData := NewStreamerWithData(data)
+
+	newStreamerWithData.Foreach(func(elem *testUser) {
+		elem.Age += 10
+	}, func(elem *testUser) {
+		elem.Age += 1
 	})
-	expectedResult := []int{25, 25, 30, 35}
+	result := []int{}
+	newStreamerWithData.Map(func(elem *testUser) int {
+		return elem.Age
+	}).Scan(&result)
+	expectedResult := []int{26, 26, 31, 36}
 
 	assertEquals(t, result, expectedResult)
 }
 
 func TestStreamerScan(t *testing.T) {
 	result := []testUser{}
-	err := streamer.Scan(&result)
-	if err != nil {
-		t.Fatal(err)
-	}
+	streamer.Scan(&result)
 	expectedResult := testData[:]
 
 	assertEquals(t, result, expectedResult)
@@ -175,6 +181,21 @@ func TestStreamerGroupBy(t *testing.T) {
 		25: {
 			testData[3],
 		},
+	}
+
+	assertEquals(t, result, expectedResult)
+}
+
+func TestStreamerToMap(t *testing.T) {
+	result := map[int]testUser{}
+	streamer.ToMap(func(elem testUser) int {
+		return elem.ID
+	}, &result)
+	expectedResult := map[int]testUser{
+		1: testData[0],
+		2: testData[1],
+		3: testData[2],
+		4: testData[3],
 	}
 
 	assertEquals(t, result, expectedResult)

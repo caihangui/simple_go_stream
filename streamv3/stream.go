@@ -31,7 +31,7 @@ type Stream interface {
 	Parallel(parallel int) Stream
 	// 根据filter func过滤符合条件的elem
 	// filter参数应为 func (item T) bool，T为上游数据类型
-	Filter(filter interface{}) Stream
+	Filter(filter ...interface{}) Stream
 	// 根据mapper func将stream中的elem对象转化成另一种对象
 	// mapper参数应为 func (item T) O，T为上游数据类型，O为产出的新数据类型
 	Map(mapper interface{}) Stream
@@ -49,7 +49,7 @@ type Stream interface {
 
 	// 遍历所有结果，对每个结果执行希望的op func
 	// foreachOp参数应为 func (item T)，T为上游数据类型
-	Foreach(foreachOp interface{})
+	Foreach(foreachOps ...interface{})
 	// 将结果读取出来，调用者根据stream中的元素类型，传入相应的slice pointer
 	// result参数应为 []T类型，T为上游数据类型
 	Scan(result interface{})
@@ -57,6 +57,11 @@ type Stream interface {
 	// keyer参数应为 func (item T) K ，T为上游数据类型，K为 groupby key的类型
 	// result参数应为map[K][]T
 	GroupBy(keyer interface{}, result interface{})
+	// 根据getKey func获取key，结果由result带出。
+	// ToMap和GroupBy的区别是，ToMap需要调用者保证key的唯一性，若数据中key重复，会直接覆盖
+	// keyer参数应为 func (item T) K ，T为上游数据类型，K为 tomap key的类型
+	// result参数应为map[K]T
+	ToMap(keyer interface{}, result interface{})
 	// 获取结果中的第一个
 	// result参数应为T类型，T为上游数据类型
 	First(result interface{}) bool
@@ -77,7 +82,7 @@ type Stream interface {
 type Streamer struct {
 	lastStreamer *Streamer
 	parallel     int
-	filterFunc   *reflect.Value
+	filterFunc   []reflect.Value
 	mapFunc      *reflect.Value
 	sortFunc     *reflect.Value
 	offset       int
@@ -131,33 +136,38 @@ func (streamer *Streamer) Parallel(parallel int) *Streamer {
 
 // Filter 过滤规则，filter的参数elem是stream中的元素
 // 若调用者在filter中进行转型断言，需要调用者自己保证stream中的元素可以被转型断言
-func (streamer *Streamer) Filter(filter interface{}) *Streamer {
-	fv := reflect.ValueOf(filter)
-	if fv.Kind() != reflect.Func {
-		panic(fmt.Errorf("filter must be a function, not %s", fv.Kind()))
-	}
-	ft := fv.Type()
-	if ft.NumIn() != 1 {
-		panic(fmt.Errorf("filter's args number must equals 1, not %d", ft.NumIn()))
-	}
+func (streamer *Streamer) Filter(filters ...interface{}) *Streamer {
+	fvs := []reflect.Value{}
+	for i := 0; i < len(filters); i++ {
+		filter := filters[i]
+		fv := reflect.ValueOf(filter)
+		if fv.Kind() != reflect.Func {
+			panic(fmt.Errorf("filter must be a function, not %s", fv.Kind()))
+		}
+		ft := fv.Type()
+		if ft.NumIn() != 1 {
+			panic(fmt.Errorf("filter's args number must equals 1, not %d", ft.NumIn()))
+		}
 
-	ip1 := ft.In(0)
-	if streamer.curType != ip1 {
-		panic(fmt.Errorf("upstream data's type is %s, but filter's args type is %s", streamer.curType, ip1))
-	}
+		ip1 := ft.In(0)
+		if streamer.curType != ip1 {
+			panic(fmt.Errorf("upstream data's type is %s, but filter's args type is %s", streamer.curType, ip1))
+		}
 
-	if ft.NumOut() != 1 {
-		panic(fmt.Errorf("filter's output number must equals 1, not %d", ft.NumOut()))
-	}
-	op1 := ft.Out(0)
-	if op1.Kind() != reflect.Bool {
-		panic(fmt.Errorf("filter's return-val type should be bool, not %s", op1))
+		if ft.NumOut() != 1 {
+			panic(fmt.Errorf("filter's output number must equals 1, not %d", ft.NumOut()))
+		}
+		op1 := ft.Out(0)
+		if op1.Kind() != reflect.Bool {
+			panic(fmt.Errorf("filter's return-val type should be bool, not %s", op1))
+		}
+		fvs = append(fvs, fv)
 	}
 
 	return &Streamer{
 		lastStreamer: streamer,
 		parallel:     streamer.parallel,
-		filterFunc:   &fv,
+		filterFunc:   fvs,
 		mapFunc:      nil,
 		sortFunc:     nil,
 		offset:       streamer.offset,
@@ -273,27 +283,35 @@ func (streamer *Streamer) Sorted(sorter interface{}) *Streamer {
 }
 
 // Foreach 遍历streamer中的每个元素
-func (streamer *Streamer) Foreach(foreachOp interface{}) {
-	fv := reflect.ValueOf(foreachOp)
-	if fv.Kind() != reflect.Func {
-		panic(fmt.Errorf("foreachOp must be a function, not %s", fv.Kind()))
-	}
-	ft := fv.Type()
-	if ft.NumIn() != 1 {
-		panic(fmt.Errorf("foreachOp's args number must equals 1, not %d", ft.NumIn()))
+func (streamer *Streamer) Foreach(foreachOps ...interface{}) {
+	fvs := []reflect.Value{}
+	for i := 0; i < len(foreachOps); i++ {
+		foreachOp := foreachOps[i]
+		fv := reflect.ValueOf(foreachOp)
+		if fv.Kind() != reflect.Func {
+			panic(fmt.Errorf("foreachOp must be a function, not %s", fv.Kind()))
+		}
+		ft := fv.Type()
+		if ft.NumIn() != 1 {
+			panic(fmt.Errorf("foreachOp's args number must equals 1, not %d", ft.NumIn()))
+		}
+
+		ip1 := ft.In(0)
+		if streamer.curType != ip1 {
+			panic(fmt.Errorf("upstream data's type is %s, but foreachOp's args type is %s", streamer.curType, ip1))
+		}
+
+		if ft.NumOut() != 0 {
+			panic(fmt.Errorf("foreachOp's output number must equals 0, not %d", ft.NumOut()))
+		}
+		fvs = append(fvs, fv)
 	}
 
-	ip1 := ft.In(0)
-	if streamer.curType != ip1 {
-		panic(fmt.Errorf("upstream data's type is %s, but foreachOp's args type is %s", streamer.curType, ip1))
-	}
-
-	if ft.NumOut() != 0 {
-		panic(fmt.Errorf("foreachOp's output number must equals 0, not %d", ft.NumOut()))
-	}
 	result := streamer.scan()
 	for i := 0; i < len(result); i++ {
-		_ = call(fv, result[i])
+		for j := 0; j < len(fvs); j++ {
+			_ = call(fvs[j], result[i])
+		}
 	}
 }
 
@@ -372,6 +390,53 @@ func (streamer *Streamer) GroupBy(keyer interface{}, result interface{}) {
 
 	scanResult := streamer.scan()
 	streamer.groupBy(fv, scanResult, &val)
+}
+
+// ToMap 根据getKey函数获取key，并将to map结果作为一个result map带回
+func (streamer *Streamer) ToMap(keyer interface{}, result interface{}) {
+	if keyer == nil {
+		panic(errors.New("keyer func can't be nil"))
+	}
+	fv := reflect.ValueOf(keyer)
+	if fv.Kind() != reflect.Func {
+		panic(fmt.Errorf("keyer must be a function, not %s", fv.Kind()))
+	}
+	ft := fv.Type()
+	if ft.NumIn() != 1 {
+		panic(fmt.Errorf("keyer's args number must equals 1, not %d", ft.NumIn()))
+	}
+
+	ip1 := ft.In(0)
+	if streamer.curType != ip1 {
+		panic(fmt.Errorf("upstream data's type is %s, but keyer's args type is %s", streamer.curType, ip1))
+	}
+
+	if ft.NumOut() != 1 {
+		panic(fmt.Errorf("keyer's output number must equals 1, not %d", ft.NumOut()))
+	}
+	op1 := ft.Out(0)
+	val := reflect.ValueOf(result)
+	rt := reflect.TypeOf(result)
+	if val.Kind() == reflect.Ptr {
+		val = val.Elem()
+		rt = rt.Elem()
+	}
+	if val.Kind() != reflect.Map {
+		panic(fmt.Errorf("GroupBy result must be map or map pointer, not %s", val.Kind()))
+	}
+	if rt.Key() != op1 {
+		panic(fmt.Errorf("keyer's return-value type is %s, but GroupBy result's key type is %s", op1, rt.Key()))
+	}
+	if rt.Elem() != streamer.curType {
+		panic(fmt.Errorf("upstream data's type is %s, but GroupBy result's value type is %s", streamer.curType, rt.Elem()))
+	}
+	// nil map init
+	if val.IsNil() {
+		val.Set(reflect.MakeMap(val.Type()))
+	}
+
+	scanResult := streamer.scan()
+	streamer.toMap(fv, scanResult, &val)
 }
 
 // First 取第一个结果
@@ -462,7 +527,7 @@ func (streamer *Streamer) scan() []interface{} {
 
 // filter 内部实现，用于其他方法复用
 func (streamer *Streamer) filter(data []interface{}) (result []interface{}) {
-	if streamer.filterFunc == nil {
+	if len(streamer.filterFunc) == 0 {
 		return streamer.data
 	}
 	var wg sync.WaitGroup
@@ -485,8 +550,15 @@ func (streamer *Streamer) filter(data []interface{}) (result []interface{}) {
 			}()
 			res := []interface{}{}
 			for i := start; i < end; i++ {
-				op := call(*streamer.filterFunc, data[i])
-				if op[0].Bool() {
+				isFilter := true
+				for j := 0; j < len(streamer.filterFunc); j++ {
+					op := call(streamer.filterFunc[j], data[i])
+					isFilter = op[0].Bool()
+					if !isFilter {
+						break
+					}
+				}
+				if isFilter {
 					res = append(res, data[i])
 				}
 			}
@@ -602,6 +674,53 @@ func (streamer *Streamer) groupBy(keyer reflect.Value, scanResult []interface{},
 				valList = reflect.Append(valList, reflect.ValueOf(v[j]))
 			}
 			val.SetMapIndex(reflect.ValueOf(k), valList)
+		}
+	}
+}
+
+func (streamer *Streamer) toMap(keyer reflect.Value, scanResult []interface{}, valPointer *reflect.Value) {
+	var wg sync.WaitGroup
+	var panicError error
+	wg.Add(streamer.parallel)
+	val := *valPointer
+	batch := len(scanResult) / streamer.parallel
+	// collect results from different worker goroutine
+	// make the cap equals streamer.parallel, and use iteration index as goroutineID to avoid concurrent problem
+	resultCollection := make(map[int]map[interface{}]interface{}, streamer.parallel)
+
+	for i := 0; i < streamer.parallel; i++ {
+		start := i * batch
+		end := start + batch
+		if i == streamer.parallel-1 && end < len(scanResult) {
+			end = len(scanResult)
+		}
+		// new worker goroutine
+		go func(goroutineID, start, end int) {
+			defer func() {
+				if r := recover(); r != nil {
+					panicError = fmt.Errorf("panic: %s", r)
+				}
+				wg.Done()
+			}()
+			curGoroutineMap := map[interface{}]interface{}{}
+			resultCollection[goroutineID] = curGoroutineMap
+			for j := start; j < end; j++ {
+				op := call(keyer, scanResult[j])
+				key := op[0].Interface()
+				curGoroutineMap[key] = scanResult[j]
+			}
+		}(i, start, end)
+	}
+	wg.Wait()
+	// 内部多个goroutine并行，将内部panic放回主goroutine中
+	if panicError != nil {
+		panic(panicError)
+	}
+	// merge results from different worker goroutine
+	for i := 0; i < streamer.parallel; i++ {
+		goroutineMap := resultCollection[i]
+		for k, v := range goroutineMap {
+			val.SetMapIndex(reflect.ValueOf(k), reflect.ValueOf(v))
 		}
 	}
 }
