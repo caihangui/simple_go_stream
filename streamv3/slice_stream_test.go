@@ -40,10 +40,10 @@ var testData = []testUser{
 	},
 }
 
-var streamer *Streamer
+var streamer SliceStream
 
 func init() {
-	streamer = NewStreamerWithData(testData)
+	streamer = OfSlice(testData)
 }
 
 // 仅限用于test，实际使用是reflect.DeepEqual的性能不行
@@ -54,7 +54,7 @@ func assertEquals(t *testing.T, result, expectedResult interface{}) {
 }
 
 func TestNewStreamerWithData(t *testing.T) {
-	_ = NewStreamerWithData(testData)
+	_ = OfSlice(testData)
 }
 
 func TestStreamerFilter(t *testing.T) {
@@ -142,7 +142,7 @@ func TestStreamerForeach(t *testing.T) {
 		newUser := user
 		data = append(data, &newUser)
 	}
-	newStreamerWithData := NewStreamerWithData(data)
+	newStreamerWithData := OfSlice(data)
 
 	newStreamerWithData.Foreach(func(elem *testUser) {
 		elem.Age += 10
@@ -257,4 +257,28 @@ func TestStreamerIndexAt(t *testing.T) {
 func TestStreamerCount(t *testing.T) {
 	count := streamer.Count()
 	assertEquals(t, len(testData), count)
+}
+
+func TestStreamerFlatMap(t *testing.T) {
+	result := []int{}
+	streamer.FlatMap(func(elem testUser) []string {
+		return strings.Split(elem.Email, "@")
+	}).Map(func (elem string) int {
+		return len(elem)
+	}).Scan(&result)
+	expectedResult := []int{8, 7, 4, 7, 6, 7, 7, 7}
+	assertEquals(t, result, expectedResult)
+}
+
+func TestReduce(t *testing.T) {
+	result := &testUser{}
+	streamer.Reduce(func(first, second testUser) testUser {
+		first.Age += second.Age
+		return first
+	}, result)
+	expectedResult := 0
+	for i := 0; i < len(testData); i++ {
+		expectedResult += testData[i].Age
+	}
+	assertEquals(t, result.Age, expectedResult)
 }
