@@ -713,12 +713,12 @@ func (streamer *SliceStreamer) _map(data []interface{}) (result []interface{}) {
 
 // reduce 内部实现，用于其他方法复用
 func (streamer *SliceStreamer) reduce(fv, iv reflect.Value) {
-	data := streamer.dataGetter.getData()
+	data := streamer.scan()
 	if len(data) == 0 {
 		return
 	}
 	if len(data) == 1 {
-		iv.Set(reflect.ValueOf(streamer.dataGetter.getData()[0]))
+		iv.Set(reflect.ValueOf(data[0]))
 		return
 	}
 	baseVal := iv
